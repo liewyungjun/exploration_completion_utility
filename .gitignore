@@ -1,0 +1,4 @@
+resources/
+runs/
+*/__pycache__/*
+tests/
