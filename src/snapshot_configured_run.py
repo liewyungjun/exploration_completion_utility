@@ -18,15 +18,13 @@ DEFAULT_RUN_ROOT = UTILITY_ROOT / "runs"
 DEFAULT_GROUND_TRUTH = UTILITY_ROOT / "resources" / "virtualrun.ply"
 DEFAULT_CONFIG = (
     WORKSPACE_SRC
-    / "pybullet_e2e"
-    / "ros_pybullet_gym"
-    / "scripts"
+    / "flush_search"
+    / "config"
     / "v_configs.py"
 )
 DEFAULT_ARTIFACT_ROOT = (
     WORKSPACE_SRC
-    / "pybullet_e2e"
-    / "ros_pybullet_gym"
+    / "flush_search"
     / "artifacts"
 )
 

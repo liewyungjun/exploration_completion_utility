@@ -42,10 +42,9 @@ exploration_completion_utility/
 └── tests/      unit tests
 ```
 
-`resources/virtualrun.ply` is the default reference cloud. Manual controller
-exports without `aeromaze-devctl` are saved in `resources/manual_maps/`; the
-timestamped manual-save tool writes to `resources/manual_runs/`. Artifact-run
-snapshots and their evaluation results belong in `runs/`.
+`resources/virtualrun.ply` is the default reference cloud. Artifact-run
+snapshots and their evaluation results belong in `runs/`. Map artifacts remain
+owned by the ROS 2 run directory supplied to the snapshot command.
 
 ## Project components
 
@@ -62,8 +61,8 @@ snapshots and their evaluation results belong in `runs/`.
 
 ### Artifact run
 
-An artifact run normally lives under
-`pybullet_e2e/ros_pybullet_gym/artifacts/<run_id>/` and contains:
+An artifact run normally lives under `flush_search/artifacts/<run_id>/`, or at
+an explicitly supplied absolute path, and contains:
 
 ```text
 <run_id>/
@@ -92,8 +91,8 @@ The snapshot records the selected maps, source artifact manifest, mission
 configuration, team membership, ordered grid sequences, resolved grid bounds,
 and region unions. It also copies the exact mission configuration to
 `<snapshot>/v_configs.py` for audit. Later evaluation reads the frozen manifest,
-not the live `pybullet_e2e/ros_pybullet_gym/scripts/v_configs.py`. Maps are
-referenced in place by default; `--copy-maps` copies them into the snapshot.
+not the live `flush_search/config/v_configs.py`. Maps are referenced in place
+by default; `--copy-maps` copies them into the snapshot.
 
 The evaluator's default reference cloud is `resources/virtualrun.ply`. A different cloud
 or mission configuration can be supplied with `--ground-truth` or
