@@ -1,3 +1,4 @@
+import hashlib
 import sys
 import tempfile
 import unittest
@@ -9,7 +10,11 @@ import yaml
 UTILITY_SRC = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(UTILITY_SRC))
 
-from snapshot_configured_run import DEFAULT_ARTIFACT_ROOT, DEFAULT_CONFIG, snapshot
+from snapshot_configured_run import (
+    DEFAULT_ARTIFACT_ROOT,
+    DEFAULT_GROUND_TRUTH,
+    snapshot,
+)
 
 
 CONFIG_SOURCE = """
@@ -24,6 +29,8 @@ FRONTIER_GRID_BOUNDS = {
     11: {"min": [2.0, 0.0, 0.0], "max": [4.0, 2.0, 0.0]},
     20: {"min": [0.0, 2.0, 0.0], "max": [4.0, 4.0, 0.0]},
 }
+FRONTIER_DYNAMIC_OUTLINE_ENABLED = True
+FRONTIER_DYNAMIC_OUTLINE_GRIDS = [11, 20]
 POST_MISSION_BONXAI_MAP_FILENAME_TEMPLATE = "agent{agent_id:03d}_map.yaml"
 POST_MISSION_COVERAGE_Z_BOUNDS_M = (0.0, 6.0)
 POST_MISSION_COVERAGE_VOXEL_SIZE_M = 0.2
@@ -36,12 +43,15 @@ class SnapshotConfiguredRunTests(unittest.TestCase):
     def test_defaults_follow_the_sibling_repository_layout(self):
         workspace_src = Path(__file__).resolve().parents[2]
         self.assertEqual(
-            DEFAULT_CONFIG,
-            workspace_src / "flush_search" / "config" / "v_configs.py",
-        )
-        self.assertEqual(
             DEFAULT_ARTIFACT_ROOT,
             workspace_src / "flush_search" / "artifacts",
+        )
+        self.assertEqual(
+            DEFAULT_GROUND_TRUTH,
+            workspace_src
+            / "exploration_completion_utility"
+            / "resources"
+            / "virtualrun_2.ply",
         )
 
     def setUp(self):
@@ -74,9 +84,109 @@ class SnapshotConfiguredRunTests(unittest.TestCase):
         )
         return path
 
+    def _freeze_mission_config(self):
+        frozen_config = self.artifact_run / "v_configs.py"
+        frozen_config.write_text(CONFIG_SOURCE, encoding="utf-8")
+        manifest = {
+            "schema_version": 1,
+            "run_id": "run_a",
+            "inputs": {
+                "mission_config": {
+                    "path": "v_configs.py",
+                    "sha256": hashlib.sha256(frozen_config.read_bytes()).hexdigest(),
+                }
+            },
+            "resolved_mission_config": {
+                "teams": {
+                    0: {
+                        "agent_ids": [0, 1],
+                        "grid_order": [10, 11],
+                        "grid_config": {
+                            "agent_ids": [0, 1],
+                            "source": "simple_sector_sequence",
+                            "sequence": [10, 11],
+                        },
+                    },
+                    1: {
+                        "agent_ids": [2],
+                        "grid_order": [20, 11],
+                        "grid_config": {
+                            "agent_ids": [2],
+                            "source": "simple_sector_road",
+                            "road": "middle",
+                        },
+                    },
+                },
+                "grid_bounds": {
+                    10: {"min": [0.0, 0.0, 0.0], "max": [2.0, 2.0, 0.0]},
+                    11: {"min": [2.0, 0.0, 0.0], "max": [4.0, 2.0, 0.0]},
+                    20: {"min": [0.0, 2.0, 0.0], "max": [4.0, 4.0, 0.0]},
+                },
+                "dynamic_outlines_enabled": True,
+                "dynamic_grid_ids": [11, 20],
+                "map_filename_template": "agent{agent_id:03d}_map.yaml",
+                "coverage": {
+                    "z_bounds_m": [0.0, 6.0],
+                    "voxel_size_m": 0.2,
+                    "match_tolerance_m": 0.3,
+                    "vis": False,
+                },
+            },
+        }
+        (self.artifact_run / "manifest.yaml").write_text(
+            yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
+        )
+        return frozen_config
+
+    def test_uses_frozen_artifact_config_without_working_tree_fallback(self):
+        frozen_config = self._freeze_mission_config()
+        self._map(1)
+        self._map(3)
+
+        run_dir = snapshot(
+            self.artifact_run,
+            self.output_root,
+            self.ground_truth,
+            None,
+        )
+
+        self.assertEqual(
+            (run_dir / "v_configs.py").read_bytes(), frozen_config.read_bytes()
+        )
+        with (run_dir / "manifest.yaml").open(encoding="utf-8") as stream:
+            manifest = yaml.safe_load(stream)
+        self.assertEqual(
+            manifest["evaluation"]["region_unions"]["configured_grid_footprint"],
+            ["grid_10", "grid_11", "grid_20"],
+        )
+
+    def test_missing_frozen_config_requires_explicit_legacy_override(self):
+        with self.assertRaisesRegex(ValueError, "inputs"):
+            snapshot(
+                self.artifact_run,
+                self.output_root,
+                self.ground_truth,
+                None,
+            )
+
+    def test_explicit_config_cannot_override_frozen_artifact(self):
+        self._freeze_mission_config()
+        with self.assertRaisesRegex(ValueError, "cannot override"):
+            snapshot(
+                self.artifact_run,
+                self.output_root,
+                self.ground_truth,
+                self.config,
+            )
+
     def test_discovers_partial_multi_team_maps_and_references_them(self):
         map_1 = self._map(1)
         map_3 = self._map(3)
+        outcome = self.artifact_run / "agent001_grid_outcomes.json"
+        outcome.write_text(
+            '{"grid_outcomes":{"10":{"status":"local_complete"}}}\n',
+            encoding="utf-8",
+        )
 
         run_dir = snapshot(
             self.artifact_run,
@@ -106,6 +216,17 @@ class SnapshotConfiguredRunTests(unittest.TestCase):
         )
         self.assertTrue((run_dir / "artifact_manifest.yaml").is_file())
         self.assertTrue((run_dir / "v_configs.py").is_file())
+        self.assertEqual(
+            manifest["mission_config"]["dynamic_grid_ids"], [11, 20]
+        )
+        self.assertEqual(
+            manifest["mission_results"]["grid_outcomes"],
+            {"1": "grid_outcomes/agent001_grid_outcomes.json"},
+        )
+        self.assertEqual(
+            (run_dir / "grid_outcomes" / outcome.name).read_bytes(),
+            outcome.read_bytes(),
+        )
 
     def test_team_selection_requires_every_team_map(self):
         self._map(1)

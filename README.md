@@ -7,7 +7,7 @@ Offline evaluation for saved Bonxai occupancy maps against a reference point clo
 ```text
 exploration_completion_utility/
 ├── resources/
-│   └── virtualrun.ply                 # default ground-truth cloud
+│   └── virtualrun_2.ply               # default ground-truth cloud
 ├── runs/                              # frozen snapshots of aeromaze-devctl artifacts
 ├── src/                               # evaluator and snapshot scripts
 └── tests/                             # unit tests
@@ -30,11 +30,15 @@ python3 exploration_completion_utility/src/snapshot_configured_run.py \
 
 `<artifact_run_id>` is resolved under `flush_search/artifacts/`. Provide the
 full artifact-run path when the run manager wrote it elsewhere, such as a
-container-mounted artifact directory. The default mission configuration is
-`flush_search/config/v_configs.py`. The new snapshot and its results are written to
-`exploration_completion_utility/runs/<artifact_run_id>_coverage/` by default.
+container-mounted artifact directory. Mission configuration, teams, grids, and
+coverage settings are read from the artifact's frozen `manifest.yaml`; the
+working-tree config is never used implicitly. The new snapshot and its results
+are written to `exploration_completion_utility/runs/<artifact_run_id>_coverage/`
+by default.
 Use `--teams 0,1` or `--agents 1,4,6` to select maps, and `--run-id` to choose
-the snapshot directory name.
+the snapshot directory name. Coverage uses the half-open Z interval configured
+by the frozen `POST_MISSION_COVERAGE_Z_BOUNDS_M`; a `(0.0, 3.0)` setting excludes
+points and map voxels at or above 3.0 m.
 
 To snapshot without evaluating, omit `--evaluate`. Evaluate it later with:
 
@@ -46,7 +50,7 @@ python3 exploration_completion_utility/src/evaluate_coverage.py \
   --no-vis
 ```
 
-The default reference is `resources/virtualrun.ply`. Artifact maps are
+The default reference is `resources/virtualrun_2.ply`. Artifact maps are
 referenced in place by default; pass `--copy-maps` only when a snapshot needs
 its own map copies.
 
@@ -71,10 +75,10 @@ Close the 3D viewer window to let the command finish.
 
 ## ROS 2 artifact locations
 
-The M5 ROS 2 launch accepts an `artifact_directory` launch argument and defaults
-to `/tmp/aeromaze_m5`. The waypoint controllers write their final Bonxai maps
-there. The coverage snapshot command additionally requires an artifact
-`manifest.yaml`; a plain manual launch does not create that manifest by itself.
+The production ROS 2 launch accepts an `artifact_directory` launch argument and
+defaults under `flush_search/artifacts/`. Before starting nodes it freezes the
+selected configuration inputs and writes `manifest.yaml`; waypoint controllers
+then write their final Bonxai maps into the same directory.
 
 For a run-manager artifact under `flush_search/artifacts/<run_id>`, pass only
 `<run_id>`. For any other location, pass the complete run directory:
@@ -88,8 +92,9 @@ python3 exploration_completion_utility/src/snapshot_configured_run.py \
 ```
 
 The supplied directory must contain `manifest.yaml` and the configured
-`agentNNN_map.yaml` files. Use `--mission-config` only when evaluating with a
-configuration other than `flush_search/config/v_configs.py`.
+`agentNNN_map.yaml` files. New manifests contain resolved mission values plus
+the path and SHA-256 of the frozen `v_configs.py`. Use `--mission-config` only
+as an explicit override for a legacy artifact that predates this contract.
 
 ## Results
 

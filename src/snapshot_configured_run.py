@@ -2,6 +2,7 @@
 """Snapshot one artifact run and write a team-aware coverage manifest."""
 
 import argparse
+import hashlib
 import importlib.util
 import math
 import os
@@ -15,13 +16,7 @@ import yaml
 UTILITY_ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE_SRC = UTILITY_ROOT.parent
 DEFAULT_RUN_ROOT = UTILITY_ROOT / "runs"
-DEFAULT_GROUND_TRUTH = UTILITY_ROOT / "resources" / "virtualrun.ply"
-DEFAULT_CONFIG = (
-    WORKSPACE_SRC
-    / "flush_search"
-    / "config"
-    / "v_configs.py"
-)
+DEFAULT_GROUND_TRUTH = UTILITY_ROOT / "resources" / "virtualrun_2.ply"
 DEFAULT_ARTIFACT_ROOT = (
     WORKSPACE_SRC
     / "flush_search"
@@ -39,6 +34,112 @@ def _load_mission_config(path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _required(mapping, key, context):
+    if not isinstance(mapping, dict) or key not in mapping:
+        raise ValueError(f"{context} is missing required field {key!r}")
+    return mapping[key]
+
+
+def _artifact_path(artifact_run, value, context):
+    path = (artifact_run / str(value)).resolve()
+    if not path.is_relative_to(artifact_run):
+        raise ValueError(f"{context} escapes the artifact run directory")
+    if not path.is_file():
+        raise FileNotFoundError(f"{context} does not exist: {path}")
+    return path
+
+
+def _file_sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _frozen_mission_config(artifact_run, artifact_manifest):
+    inputs = _required(artifact_manifest, "inputs", "artifact manifest")
+    mission_input = _required(inputs, "mission_config", "artifact manifest inputs")
+    mission_config_path = _artifact_path(
+        artifact_run,
+        _required(mission_input, "path", "artifact mission-config input"),
+        "artifact mission-config input",
+    )
+    expected_sha256 = _required(
+        mission_input, "sha256", "artifact mission-config input"
+    )
+    actual_sha256 = _file_sha256(mission_config_path)
+    if actual_sha256 != expected_sha256:
+        raise ValueError(
+            "artifact mission config hash does not match its manifest: "
+            f"{mission_config_path}"
+        )
+
+    resolved = _required(
+        artifact_manifest, "resolved_mission_config", "artifact manifest"
+    )
+    raw_teams = _required(resolved, "teams", "resolved mission config")
+    if not isinstance(raw_teams, dict) or not raw_teams:
+        raise ValueError("resolved mission config teams must be a non-empty mapping")
+    team_grid_configs = {}
+    team_member_ids = {}
+    grid_orders = {}
+    for raw_team_id, raw_team in raw_teams.items():
+        team_id = int(raw_team_id)
+        team_grid_configs[team_id] = dict(
+            _required(raw_team, "grid_config", f"resolved team {team_id}")
+        )
+        team_member_ids[team_id] = tuple(
+            int(value)
+            for value in _required(raw_team, "agent_ids", f"resolved team {team_id}")
+        )
+        grid_orders[team_id] = tuple(
+            int(value)
+            for value in _required(raw_team, "grid_order", f"resolved team {team_id}")
+        )
+    coverage = _required(resolved, "coverage", "resolved mission config")
+    values = {
+        "FRONTIER_TEAM_GRID_CONFIGS": team_grid_configs,
+        "FRONTIER_TEAM_MEMBER_IDS": team_member_ids,
+        "FRONTIER_GRID_ORDERS_BY_TEAM": grid_orders,
+        "FRONTIER_GRID_BOUNDS": {
+            int(key): value
+            for key, value in _required(
+                resolved, "grid_bounds", "resolved mission config"
+            ).items()
+        },
+        "FRONTIER_DYNAMIC_OUTLINE_ENABLED": bool(
+            _required(
+                resolved,
+                "dynamic_outlines_enabled",
+                "resolved mission config",
+            )
+        ),
+        "FRONTIER_DYNAMIC_OUTLINE_GRIDS": tuple(
+            int(value)
+            for value in _required(
+                resolved, "dynamic_grid_ids", "resolved mission config"
+            )
+        ),
+        "POST_MISSION_BONXAI_MAP_FILENAME_TEMPLATE": str(
+            _required(resolved, "map_filename_template", "resolved mission config")
+        ),
+        "POST_MISSION_COVERAGE_Z_BOUNDS_M": tuple(
+            _required(coverage, "z_bounds_m", "resolved coverage config")
+        ),
+        "POST_MISSION_COVERAGE_VOXEL_SIZE_M": float(
+            _required(coverage, "voxel_size_m", "resolved coverage config")
+        ),
+        "POST_MISSION_COVERAGE_MATCH_TOLERANCE_M": float(
+            _required(coverage, "match_tolerance_m", "resolved coverage config")
+        ),
+        "POST_MISSION_COVERAGE_VIS": bool(
+            _required(coverage, "vis", "resolved coverage config")
+        ),
+    }
+    return type("FrozenMissionConfig", (), values)(), mission_config_path
 
 
 def _positive_ids(value):
@@ -244,13 +345,25 @@ def _aligned_lower_bound(value, map_origin, resolution):
     return float(map_origin + steps * resolution)
 
 
-def snapshot(artifact_run, output_root, ground_truth, mission_config,
+def snapshot(artifact_run, output_root, ground_truth, mission_config=None,
              agent_ids=None, team_ids=None, run_id=None, copy_maps=False):
     artifact_run, artifact_manifest_path, artifact_manifest = (
         _load_artifact_manifest(artifact_run)
     )
-    mission_config = Path(mission_config).resolve()
-    v_cfg = _load_mission_config(mission_config)
+    if mission_config is None:
+        v_cfg, mission_config = _frozen_mission_config(
+            artifact_run, artifact_manifest
+        )
+    else:
+        if (
+            "resolved_mission_config" in artifact_manifest
+            or "mission_config" in (artifact_manifest.get("inputs") or {})
+        ):
+            raise ValueError(
+                "--mission-config cannot override a frozen artifact manifest"
+            )
+        mission_config = Path(mission_config).resolve()
+        v_cfg = _load_mission_config(mission_config)
     team_configs, configured_agents = _team_configuration(v_cfg)
     available_maps = _artifact_maps(artifact_run, v_cfg, configured_agents)
     selected_agents = _select_agents(
@@ -289,6 +402,22 @@ def snapshot(artifact_run, output_root, ground_truth, mission_config,
         ]
     shutil.copy2(artifact_manifest_path, run_dir / "artifact_manifest.yaml")
     shutil.copy2(mission_config, run_dir / "v_configs.py")
+
+    grid_outcome_paths = {}
+    selected_team_agents = sorted({
+        agent_id
+        for team_id in selected_team_ids
+        for agent_id in team_configs[team_id]["agent_ids"]
+    })
+    for agent_id in selected_team_agents:
+        source = artifact_run / f"agent{agent_id:03d}_grid_outcomes.json"
+        if not source.is_file():
+            continue
+        destination_dir = run_dir / "grid_outcomes"
+        destination_dir.mkdir(exist_ok=True)
+        destination = destination_dir / source.name
+        shutil.copy2(source, destination)
+        grid_outcome_paths[str(agent_id)] = os.path.relpath(destination, run_dir)
 
     try:
         z_min, z_max = (
@@ -388,7 +517,16 @@ def snapshot(artifact_run, output_root, ground_truth, mission_config,
         "mission_config": {
             "source": "v_configs.py",
             "selected_agent_ids": selected_agents,
+            "dynamic_outlines_enabled": bool(
+                v_cfg.FRONTIER_DYNAMIC_OUTLINE_ENABLED
+            ),
+            "dynamic_grid_ids": [
+                int(value) for value in v_cfg.FRONTIER_DYNAMIC_OUTLINE_GRIDS
+            ],
             "teams": manifest_teams,
+        },
+        "mission_results": {
+            "grid_outcomes": grid_outcome_paths,
         },
     }
     with (run_dir / "manifest.yaml").open("x", encoding="utf-8") as stream:
@@ -408,7 +546,13 @@ def main():
     selection.add_argument("--teams", type=_team_ids, help="zero-based IDs, e.g. 0,1")
     parser.add_argument("--output-root", default=str(DEFAULT_RUN_ROOT))
     parser.add_argument("--ground-truth", default=str(DEFAULT_GROUND_TRUTH))
-    parser.add_argument("--mission-config", default=str(DEFAULT_CONFIG))
+    parser.add_argument(
+        "--mission-config",
+        help=(
+            "explicit config override for a legacy artifact; new artifacts use "
+            "their frozen manifest/config and do not consult the working tree"
+        ),
+    )
     parser.add_argument("--run-id")
     parser.add_argument(
         "--copy-maps",

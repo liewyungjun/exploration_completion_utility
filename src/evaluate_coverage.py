@@ -2,6 +2,8 @@
 """Evaluate saved Bonxai maps against ground-truth reference voxels."""
 
 import argparse
+import ast
+import json
 import re
 import sys
 from pathlib import Path
@@ -11,7 +13,7 @@ import yaml
 
 from coverage import (
     evaluate_region, keys_in_bounds, matched_source, neighbour_offsets,
-    translate_aligned_indices,
+    occupied_voxel_metrics, translate_aligned_indices,
 )
 from ground_truth import load_voxels
 from report import show_interactive_3d, write_reports
@@ -43,6 +45,87 @@ def _agent_id_from_map_path(map_path):
     return match.group(1) if match else map_path.stem
 
 
+def _literal_config_value(path, name):
+    """Read one literal assignment from a frozen legacy config without executing it."""
+    tree = ast.parse(Path(path).read_text(encoding="utf-8"), filename=str(path))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == name
+            for target in node.targets
+        ):
+            return ast.literal_eval(node.value)
+    raise ValueError(f"{path} is missing literal assignment {name}")
+
+
+def _mission_context(manifest, base, map_paths):
+    mission_config = manifest.get("mission_config")
+    if not isinstance(mission_config, dict):
+        return None
+    teams = mission_config.get("teams")
+    if not isinstance(teams, list) or not teams:
+        raise ValueError("mission_config.teams must be a non-empty list")
+
+    dynamic_enabled = mission_config.get("dynamic_outlines_enabled")
+    dynamic_ids = mission_config.get("dynamic_grid_ids")
+    if dynamic_enabled is None or dynamic_ids is None:
+        frozen_config = base / str(mission_config.get("source", "v_configs.py"))
+        dynamic_enabled = bool(_literal_config_value(
+            frozen_config, "FRONTIER_DYNAMIC_OUTLINE_ENABLED"
+        ))
+        dynamic_ids = _literal_config_value(
+            frozen_config, "FRONTIER_DYNAMIC_OUTLINE_GRIDS"
+        )
+    dynamic_ids = [int(value) for value in dynamic_ids] if dynamic_enabled else []
+
+    outcome_paths = ((manifest.get("mission_results") or {}).get("grid_outcomes") or {})
+    if not isinstance(outcome_paths, dict):
+        raise ValueError("mission_results.grid_outcomes must be a mapping")
+    desired_agents = sorted({
+        int(agent_id)
+        for team in teams
+        for agent_id in _required(team, "agent_ids", "mission team")
+    })
+    candidates = {int(agent_id): (base / value).resolve()
+                  for agent_id, value in outcome_paths.items()}
+    artifact_dirs = {path.parent for path in map_paths}
+    for agent_id in desired_agents:
+        if agent_id in candidates:
+            continue
+        for artifact_dir in artifact_dirs:
+            candidate = artifact_dir / f"agent{agent_id:03d}_grid_outcomes.json"
+            if candidate.is_file():
+                candidates[agent_id] = candidate
+                break
+
+    outcomes = {}
+    for agent_id, path in sorted(candidates.items()):
+        if not path.is_file():
+            raise FileNotFoundError(f"grid outcome file does not exist: {path}")
+        with path.open(encoding="utf-8") as stream:
+            payload = json.load(stream)
+        raw_outcomes = _required(payload, "grid_outcomes", str(path))
+        if not isinstance(raw_outcomes, dict):
+            raise ValueError(f"{path}: grid_outcomes must be a mapping")
+        agent_outcomes = {}
+        for grid_id, value in raw_outcomes.items():
+            status = _required(value, "status", f"{path} grid {grid_id}")
+            if status not in {"local_complete", "incomplete"}:
+                raise ValueError(f"{path}: unsupported grid status {status!r}")
+            agent_outcomes[str(int(grid_id))] = {
+                "status": status,
+                "reason": str(value.get("reason", "")),
+            }
+        outcomes[str(agent_id)] = agent_outcomes
+
+    return {
+        "teams": teams,
+        "dynamic_outlines_enabled": bool(dynamic_enabled),
+        "dynamic_grid_ids": dynamic_ids,
+        "grid_outcomes": outcomes,
+        "team_grid_metrics": {},
+    }
+
+
 def evaluate(manifest_path, output_dir, voxel_override=None, tolerance_override=None,
              region_name=None, plots=True, rebuild_cache=False, vis_override=None):
     manifest_path = Path(manifest_path).resolve()
@@ -64,6 +147,7 @@ def evaluate(manifest_path, output_dir, voxel_override=None, tolerance_override=
         raise FileNotFoundError("required agent map(s) missing: " + ", ".join(missing))
     if not map_paths:
         raise ValueError("manifest agent_maps must not be empty")
+    mission = _mission_context(manifest, base, map_paths)
 
     evaluation = _required(manifest, "evaluation", "manifest")
     visualise = _visualisation_enabled(evaluation, vis_override)
@@ -203,6 +287,23 @@ def evaluate(manifest_path, output_dir, voxel_override=None, tolerance_override=
         swarm, per_agent = evaluate_region(region_gt, filtered_agents, offsets)
         regions[name] = swarm
         region_agents[name] = per_agent
+        if mission is not None and name.startswith("grid_"):
+            grid_id = int(name[5:])
+            for team in mission["teams"]:
+                grid_order = [int(value) for value in team["frontier_grid_order"]]
+                if grid_id not in grid_order:
+                    continue
+                team_agent_ids = {int(value) for value in team["agent_ids"]}
+                team_occupied = set().union(*(
+                    agent["occupied"] for agent in filtered_agents
+                    if int(agent["agent_id"]) in team_agent_ids
+                ))
+                team_metrics = occupied_voxel_metrics(
+                    region_gt, team_occupied, offsets
+                )
+                mission["team_grid_metrics"].setdefault(
+                    str(int(team["team_id"])), {}
+                )[name] = team_metrics
         if name == primary_region:
             union = set().union(*(agent["occupied"] for agent in filtered_agents))
             primary_plot = {
@@ -236,6 +337,8 @@ def evaluate(manifest_path, output_dir, voxel_override=None, tolerance_override=
         },
         "regions": regions,
     }
+    if mission is not None:
+        summary["mission"] = mission
     write_reports(
         output_dir,
         summary,

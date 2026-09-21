@@ -15,6 +15,159 @@ def _percentage_points(value):
     return f"{100.0 * value:.2f} pp"
 
 
+def _highlight(text, colour):
+    return f'<span style="color:{colour}"><strong>{text}</strong></span>'
+
+
+def _recall_text(value, bold=False):
+    text = _percent(value)
+    if value < 0.8:
+        return _highlight(text, "#dc2626")
+    return f"**{text}**" if bold else text
+
+
+def _status_text(status):
+    if status == "incomplete":
+        return _highlight(status, "#c2410c")
+    if status == "skipped":
+        return _highlight(status, "#dc2626")
+    return status
+
+
+def _grid_status(mission, agent_id, grid_id):
+    return (
+        mission.get("grid_outcomes", {})
+        .get(str(int(agent_id)), {})
+        .get(str(int(grid_id)), {})
+        .get("status", "skipped")
+    )
+
+
+def _total_status(statuses):
+    if "local_complete" in statuses:
+        return "local_complete"
+    if "incomplete" in statuses:
+        return "incomplete"
+    return "skipped"
+
+
+def _metric_cell(metrics, status):
+    if metrics is None:
+        return f"—<br>{_status_text(status)}"
+    return (
+        f"R {_recall_text(metrics['recall'])}<br>"
+        f"P {_percent(metrics['precision'])}<br>"
+        f"F1 {_percent(metrics['f1'])}<br>{_status_text(status)}"
+    )
+
+
+def _outcome_counts(statuses):
+    counts = {
+        status: statuses.count(status)
+        for status in ("local_complete", "incomplete", "skipped")
+    }
+    parts = [f"{counts['local_complete']} local_complete"]
+    for status in ("incomplete", "skipped"):
+        text = f"{counts[status]} {status}"
+        colour = "#c2410c" if status == "incomplete" else "#dc2626"
+        parts.append(_highlight(text, colour) if counts[status] else text)
+    return " / ".join(parts)
+
+
+def _mission_report_lines(summary, region_agents):
+    mission = summary.get("mission")
+    if not mission:
+        return []
+    dynamic_ids = {int(value) for value in mission["dynamic_grid_ids"]}
+    agent_metrics = {}
+    for region, rows in region_agents.items():
+        agent_metrics[region] = {int(row["agent_id"]): row for row in rows}
+
+    lines = [
+        "", "## Per-grid statistics", "",
+        (
+            "Each table follows one team's configured grid sequence. Coverage "
+            "totals use the evaluated maps from that team. "
+            "The result status is `local_complete` when any configured agent "
+            "reported it, `incomplete` when reports exist but none completed, "
+            "and `skipped` when no configured agent reported the grid."
+        ), "",
+        (
+            '<span style="color:#dc2626;font-weight:700">Red recall</span> is below '
+            "80%. Non-complete results are highlighted in amber or red."
+        ), "",
+    ]
+    for team in mission["teams"]:
+        team_id = int(team["team_id"])
+        agent_ids = [int(value) for value in team["agent_ids"]]
+        lines.extend([
+            f"### Team {team_id}", "",
+            "| Grid | Type | Recall | Precision | F1 | Result | Agent outcomes |",
+            "|---:|---|---:|---:|---:|---|---|",
+        ])
+        for raw_grid_id in team["frontier_grid_order"]:
+            grid_id = int(raw_grid_id)
+            region = f"grid_{grid_id}"
+            metrics = (
+                mission.get("team_grid_metrics", {})
+                .get(str(team_id), {})
+                .get(region)
+            )
+            if metrics is None:
+                continue
+            statuses = [
+                _grid_status(mission, agent_id, grid_id)
+                for agent_id in agent_ids
+            ]
+            lines.append(
+                f"| {grid_id} | {'dynamic' if grid_id in dynamic_ids else 'static'} | "
+                f"{_recall_text(metrics['recall'])} | "
+                f"{_percent(metrics['precision'])} | {_percent(metrics['f1'])} | "
+                f"{_status_text(_total_status(statuses))} | "
+                f"{_outcome_counts(statuses)} |"
+            )
+        lines.append("")
+
+    lines.extend(["", "## Per-agent grid statistics", ""])
+    for team in mission["teams"]:
+        team_id = int(team["team_id"])
+        agent_ids = [int(value) for value in team["agent_ids"]]
+        lines.extend([
+            f"### Team {team_id}", "",
+            "| Grid | Type | "
+            + " | ".join(f"Agent {agent_id}" for agent_id in agent_ids)
+            + " | Total |",
+            "|---:|---|" + "---|" * (len(agent_ids) + 1),
+        ])
+        for raw_grid_id in team["frontier_grid_order"]:
+            grid_id = int(raw_grid_id)
+            region = f"grid_{grid_id}"
+            if region not in summary["regions"]:
+                continue
+            statuses = [_grid_status(mission, agent_id, grid_id)
+                        for agent_id in agent_ids]
+            cells = [
+                _metric_cell(
+                    agent_metrics.get(region, {}).get(agent_id),
+                    status,
+                )
+                for agent_id, status in zip(agent_ids, statuses)
+            ]
+            total_metrics = (
+                mission.get("team_grid_metrics", {})
+                .get(str(team_id), {})
+                .get(region)
+            )
+            cells.append(_metric_cell(total_metrics, _total_status(statuses)))
+            lines.append(
+                f"| {grid_id} | {'dynamic' if grid_id in dynamic_ids else 'static'} | "
+                + " | ".join(cells) + " |"
+            )
+        lines.extend(["", "`Total` is the coverage union of evaluated maps from this team. ",
+                      "`—` means that agent had no saved map in this evaluation.", ""])
+    return lines
+
+
 def _voxel_centres(keys, origin, voxel_size):
     """Convert integer voxel keys to metric voxel-centre coordinates."""
     if not keys:
@@ -135,17 +288,20 @@ def write_reports(
         "| Measurement | Result |", "|---|---:|",
         f"| Agents evaluated | {summary['agents_evaluated']} |",
         f"| GT reference voxels | {primary['ground_truth_voxels']:,} |",
-        f"| 🟢 Occupied-voxel recall | **{_percent(primary['recall'])}** |",
+        f"| 🟢 Occupied-voxel recall | {_recall_text(primary['recall'], bold=True)} |",
         f"| 🔵 Occupied-voxel precision | **{_percent(primary['precision'])}** |",
         f"| Occupied-voxel F1 | **{_percent(primary['f1'])}** |",
         f"| Improvement over best agent | {_percentage_points(primary['improvement_over_best_agent'])} |",
         f"| 🟠 Classification conflicts | {primary['classification_conflicts']:,} |",
+    ]
+    lines.extend(_mission_report_lines(summary, region_agents))
+    lines.extend([
         "", "## Reproducibility", "",
         f"- Voxel size: `{summary['evaluation']['voxel_size_m']:.6g} m`",
         f"- Match tolerance: `{summary['evaluation']['match_tolerance_m']:.6g} m`",
         f"- Frame: `{summary['evaluation']['frame_id']}`",
         f"- Manifest: `{summary['manifest']}`",
-    ]
+    ])
     (output / "coverage_summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     if plot_data is not None:

@@ -42,7 +42,7 @@ exploration_completion_utility/
 └── tests/      unit tests
 ```
 
-`resources/virtualrun.ply` is the default reference cloud. Artifact-run
+`resources/virtualrun_2.ply` is the default reference cloud. Artifact-run
 snapshots and their evaluation results belong in `runs/`. Map artifacts remain
 owned by the ROS 2 run directory supplied to the snapshot command.
 
@@ -67,13 +67,17 @@ an explicitly supplied absolute path, and contains:
 ```text
 <run_id>/
 ├── manifest.yaml
+├── v_configs.py
+├── inputs/
+│   └── ...                         # other frozen runtime inputs
 ├── agent001_map.yaml
 ├── agent002_map.yaml
 └── ...
 ```
 
-The snapshot utility validates the artifact manifest and the configured map
-filename template. Selection is strict:
+The snapshot utility validates the artifact manifest, verifies the frozen
+`v_configs.py` hash, and uses the manifest's resolved mission values. It does
+not consult the mutable working-tree configuration. Selection is strict:
 
 | Option | IDs | Selection |
 |---|---|---|
@@ -87,16 +91,18 @@ snapshot ID is the output directory and manifest `run_id`; it defaults to
 that a frozen analysis is not overwritten; use a new `--run-id` for another
 snapshot, or evaluate the existing manifest directly.
 
-The snapshot records the selected maps, source artifact manifest, mission
-configuration, team membership, ordered grid sequences, resolved grid bounds,
-and region unions. It also copies the exact mission configuration to
-`<snapshot>/v_configs.py` for audit. Later evaluation reads the frozen manifest,
-not the live `flush_search/config/v_configs.py`. Maps are referenced in place
-by default; `--copy-maps` copies them into the snapshot.
+The source artifact already owns the exact mission configuration and resolved
+mission values. The snapshot records the selected maps, source artifact
+manifest, team membership, ordered grid sequences, resolved grid bounds, and
+region unions. It also copies the artifact's frozen mission configuration to
+`<snapshot>/v_configs.py` for audit. Later evaluation reads the frozen coverage
+manifest. Maps are referenced in place by default; `--copy-maps` copies them
+into the snapshot.
 
-The evaluator's default reference cloud is `resources/virtualrun.ply`. A different cloud
-or mission configuration can be supplied with `--ground-truth` or
-`--mission-config` when creating the snapshot.
+The evaluator's default reference cloud is `resources/virtualrun_2.ply`; a
+different cloud can be supplied with `--ground-truth`. `--mission-config` is
+only a compatibility input for legacy artifacts and cannot override a frozen
+artifact manifest.
 
 ### Evaluation manifest
 
