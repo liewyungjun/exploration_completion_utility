@@ -1,0 +1,43 @@
+From /home/user/storage/flush, run:
+
+source /home/user/miniconda3/etc/profile.d/conda.sh
+conda activate drones
+source /opt/ros/jazzy/setup.bash
+source /home/user/hifisim_ws/install/setup.bash
+source install/setup.bash
+
+python3 src/exploration_completion_utility/src/snapshot_configured_run.py \
+--artifact-run 20260921_150539_run \
+--evaluate \
+--no-vis
+
+This will create:
+
+src/exploration_completion_utility/runs/20260921_150539_run_coverage/
+├── manifest.yaml
+├── v_configs.py
+├── grid_outcomes/
+└── results/
+    ├── coverage_summary.md
+    ├── coverage_summary.json
+    ├── agent_metrics.csv
+    ├── region_metrics.csv
+    └── plots/coverage_top_down.png
+
+--no-vis only disables the blocking interactive viewer. The top-down PNG is still generated.
+
+To use the interactive 3D viewer afterward:
+
+python3 src/exploration_completion_utility/src/evaluate_coverage.py \
+--manifest src/exploration_completion_utility/runs/20260921_150539_run_coverage/manifest.yaml \
+--output src/exploration_completion_utility/runs/20260921_150539_run_coverage/results \
+--vis
+
+Close the viewer window to finish the command.
+
+The initial snapshot command automatically analyzes all available maps—agents 1, 2, and 3 for this run. You do not need to pass v_configs.py, the ground-truth path, or the 3 m
+cutoff because they are taken from the frozen artifact/default utility configuration.
+
+If you repeat the snapshot command, choose a new name because snapshots are never overwritten:
+
+--run-id 20260921_150539_coverage_rerun
