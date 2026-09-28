@@ -1,4 +1,6 @@
 import hashlib
+import json
+import numpy as np
 import sys
 import tempfile
 import unittest
@@ -254,6 +256,17 @@ class SnapshotConfiguredRunTests(unittest.TestCase):
         self.assertEqual(manifest["agent_maps"], ["maps/agent003_final.yaml"])
         self.assertTrue(manifest["artifact_run"]["maps_copied"])
         self.assertTrue((run_dir / "maps" / "agent003_final.yaml").is_file())
+
+    def test_npz_snapshot_reads_header_and_preserves_extension(self):
+        self.config.write_text(CONFIG_SOURCE.replace('_map.yaml', '_map.npz'))
+        path = self.artifact_run / 'agent003_map.npz'
+        np.savez(path, schema_version=np.int32(2), metadata_json=json.dumps(dict(
+            resolution=0.2, global_origin=[-50., -50., 0.], global_voxels=[500, 500, 30])))
+        run_dir = snapshot(self.artifact_run, self.output_root, self.ground_truth,
+                           self.config, agent_ids=[3], copy_maps=True)
+        manifest = yaml.safe_load((run_dir / 'manifest.yaml').read_text())
+        self.assertEqual(manifest['agent_maps'], ['maps/agent003_final.npz'])
+        self.assertEqual((run_dir / 'maps/agent003_final.npz').read_bytes(), path.read_bytes())
 
 
 if __name__ == "__main__":

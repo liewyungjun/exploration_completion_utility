@@ -70,8 +70,8 @@ an explicitly supplied absolute path, and contains:
 ├── v_configs.py
 ├── inputs/
 │   └── ...                         # other frozen runtime inputs
-├── agent001_map.yaml
-├── agent002_map.yaml
+├── agent001_map.npz
+├── agent002_map.npz
 └── ...
 ```
 
@@ -163,7 +163,8 @@ in the input cloud.
 
 ### 2. Bonxai map voxels
 
-Each saved map is loaded through the shared Bonxai YAML loader. Active cells are
+Each saved map is loaded through the shared Bonxai loader. Version-2 NPZ maps
+load numeric arrays directly; existing YAML maps use the legacy reader. Active cells are
 classified as `free`, `occupied`, or `unknown`.
 
 - Only `occupied` cells enter occupied-voxel recall, precision, and F1.
@@ -189,7 +190,8 @@ and deduplicated.
 
 #### Map parsing cache
 
-The first evaluation parses each YAML map and writes a NumPy `.npz` cache under
+Version-2 `.npz` map artifacts are uncompressed and need no parse cache.
+For legacy YAML only, the first evaluation parses each map and writes a NumPy `.npz` cache under
 `results/cache/`. A later evaluation using the same output directory loads the
 cache when it is at least as new as its source YAML. Editing a source map makes
 that cache stale and triggers a rebuild; `--rebuild-cache` forces a rebuild.

@@ -136,7 +136,10 @@ python3 exploration_completion_utility/src/snapshot_configured_run.py \
 ```
 
 The supplied directory must contain `manifest.yaml` and the configured
-`agentNNN_map.yaml` files. New manifests contain resolved mission values plus
+`agentNNN_map.npz` files (legacy manifests may still reference YAML). Version-2
+NPZ artifacts load directly without creating parse caches. They preserve explicit
+positions and indices; coverage continues to use indices and occupancy states.
+New manifests contain resolved mission values plus
 the path and SHA-256 of the frozen `v_configs.py`. Use `--mission-config` only
 as an explicit override for a legacy artifact that predates this contract.
 

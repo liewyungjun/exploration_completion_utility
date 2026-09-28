@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import importlib.util
+import json
 import math
 import os
 import shutil
@@ -11,6 +12,7 @@ import sys
 from pathlib import Path
 
 import yaml
+import numpy as np
 
 
 UTILITY_ROOT = Path(__file__).resolve().parents[1]
@@ -260,7 +262,7 @@ def _artifact_maps(artifact_run, v_cfg, configured_agents):
 
     unexpected = sorted(
         path.name
-        for path in artifact_run.glob("agent*_map.yaml")
+        for path in list(artifact_run.glob("agent*_map.yaml")) + list(artifact_run.glob("agent*_map.npz"))
         if path.name not in expected_names
     )
     if unexpected:
@@ -313,6 +315,13 @@ def _map_grid_metadata(path):
     """Read Bonxai grid metadata without parsing the potentially huge cell list."""
     values = {}
     wanted = {"resolution", "global_origin", "global_voxels"}
+    if path.suffix == '.npz':
+        with np.load(path, allow_pickle=False) as data:
+            if data['schema_version'].shape != () or data['schema_version'].item() != 2:
+                raise ValueError(f'{path}: unsupported map schema_version')
+            metadata = json.loads(data['metadata_json'].item())
+            values = {key: metadata[key] for key in wanted}
+        return _validate_map_grid_metadata(path, values)
     with path.open("r", encoding="utf-8") as stream:
         for line in stream:
             stripped = line.strip()
@@ -329,6 +338,10 @@ def _map_grid_metadata(path):
     if not wanted.issubset(values):
         missing = sorted(wanted - values.keys())
         raise ValueError(f"{path}: missing Bonxai grid metadata: {missing}")
+    return _validate_map_grid_metadata(path, values)
+
+
+def _validate_map_grid_metadata(path, values):
     try:
         resolution = float(values["resolution"])
         origin = [float(value) for value in values["global_origin"]]
@@ -392,7 +405,7 @@ def snapshot(artifact_run, output_root, ground_truth, mission_config=None,
         maps_dir = run_dir / "maps"
         maps_dir.mkdir()
         for agent_id in selected_agents:
-            destination = maps_dir / f"agent{agent_id:03d}_final.yaml"
+            destination = maps_dir / f"agent{agent_id:03d}_final{available_maps[agent_id].suffix}"
             shutil.copy2(available_maps[agent_id], destination)
             agent_maps.append(os.path.relpath(destination, run_dir))
     else:
