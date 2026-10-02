@@ -2,6 +2,7 @@
 """Snapshot one artifact run and write a team-aware coverage manifest."""
 
 import argparse
+import ast
 import hashlib
 import importlib.util
 import json
@@ -142,6 +143,36 @@ def _frozen_mission_config(artifact_run, artifact_manifest):
         ),
     }
     return type("FrozenMissionConfig", (), values)(), mission_config_path
+
+
+def _second_floor_settings(config_path, selected_grids):
+    """Read requested floor coverage from the exact archived mission config."""
+    names = {
+        "FRONTIER_SECOND_FLOOR_DYNAMIC_GRIDS",
+        "FRONTIER_FIRST_FLOOR_VOLUME_Z_RANGE_M",
+        "FRONTIER_SECOND_FLOOR_VOLUME_Z_RANGE_M",
+    }
+    values = {}
+    for node in ast.parse(Path(config_path).read_text(encoding="utf-8")).body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id in names:
+                    values[target.id] = ast.literal_eval(node.value)
+    requested = values.get("FRONTIER_SECOND_FLOOR_DYNAMIC_GRIDS", ())
+    grids = [int(grid) for grid in selected_grids if grid in requested]
+    if not grids:
+        return None
+    first = values["FRONTIER_FIRST_FLOOR_VOLUME_Z_RANGE_M"]
+    second = values["FRONTIER_SECOND_FLOOR_VOLUME_Z_RANGE_M"]
+    lower, upper = float(first[1]), float(second[1])
+    volume_lower = float(second[0])
+    if not all(math.isfinite(value) for value in (lower, volume_lower, upper)) or not lower <= volume_lower < upper:
+        raise ValueError("configured second-floor height ranges are invalid")
+    return {
+        "grid_ids": grids,
+        "coverage_z_bounds_m": [lower, upper],
+        "frontier_volume_z_bounds_m": [volume_lower, upper],
+    }
 
 
 def _positive_ids(value):
@@ -499,6 +530,23 @@ def snapshot(artifact_run, output_root, ground_truth, mission_config=None,
             "frontier_grid_order": list(team["grid_order"]),
         })
 
+    second_floor = (_second_floor_settings(mission_config, ordered_grid_ids)
+                    if v_cfg.FRONTIER_DYNAMIC_OUTLINE_ENABLED else None)
+    if second_floor:
+        second_min, second_max = second_floor["coverage_z_bounds_m"]
+        for grid_id in second_floor["grid_ids"]:
+            regions[f"grid_{grid_id}_second_floor"] = _bounds3(
+                v_cfg.FRONTIER_GRID_BOUNDS[grid_id], second_min, second_max, grid_id
+            )
+        region_unions["second_floor_grid_footprint"] = [
+            f"grid_{grid_id}_second_floor" for grid_id in second_floor["grid_ids"]
+        ]
+        for team in manifest_teams:
+            members = [f"grid_{grid_id}_second_floor" for grid_id in team["frontier_grid_order"]
+                       if grid_id in second_floor["grid_ids"]]
+            if members:
+                region_unions[f"team_{team['team_id']}_second_floor_grid_footprint"] = members
+
     manifest = {
         "run_id": run_id,
         "artifact_run": {
@@ -542,6 +590,9 @@ def snapshot(artifact_run, output_root, ground_truth, mission_config=None,
             "grid_outcomes": grid_outcome_paths,
         },
     }
+    if second_floor:
+        manifest["mission_config"]["second_floor"] = second_floor
+        manifest["evaluation"]["additional_plot_regions"] = ["second_floor_grid_footprint"]
     with (run_dir / "manifest.yaml").open("x", encoding="utf-8") as stream:
         yaml.safe_dump(manifest, stream, sort_keys=False)
     return run_dir

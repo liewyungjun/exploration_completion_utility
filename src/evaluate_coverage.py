@@ -123,6 +123,7 @@ def _mission_context(manifest, base, map_paths):
         "dynamic_grid_ids": dynamic_ids,
         "grid_outcomes": outcomes,
         "team_grid_metrics": {},
+        "second_floor": mission_config.get("second_floor"),
     }
 
 
@@ -162,12 +163,19 @@ def evaluate(manifest_path, output_dir, voxel_override=None, tolerance_override=
         _required(evaluation, "bounds", "evaluation"), "evaluation.bounds"
     )
     origin = primary_min.copy()
+    # Load every explicitly evaluated region, retaining the primary report bounds.
+    all_bounds = [(primary_min, primary_max)] + [
+        _bounds(value, f"evaluation.regions.{name}")
+        for name, value in (evaluation.get("regions") or {}).items()
+    ]
+    load_min = np.min([lower for lower, _ in all_bounds], axis=0)
+    load_max = np.max([upper for _, upper in all_bounds], axis=0)
 
     transform = _required(manifest, "ground_truth_transform", "manifest")
     translation = _required(transform, "translation_xyz", "ground_truth_transform")
     quaternion = _required(transform, "quaternion_xyzw", "ground_truth_transform")
     gt = load_voxels(
-        gt_path, origin, voxel_size, primary_min, primary_max, translation, quaternion
+        gt_path, origin, voxel_size, load_min, load_max, translation, quaternion
     )
 
     try:
@@ -213,9 +221,9 @@ def evaluate(manifest_path, output_dir, voxel_override=None, tolerance_override=
         }
         free = {tuple(row) for row in translated_indices[states == STATE_FREE]}
         occupied = keys_in_bounds(
-            occupied, origin, voxel_size, primary_min, primary_max
+            occupied, origin, voxel_size, load_min, load_max
         )
-        free = keys_in_bounds(free, origin, voxel_size, primary_min, primary_max)
+        free = keys_in_bounds(free, origin, voxel_size, load_min, load_max)
         agents.append({
             "agent_id": _agent_id_from_map_path(map_path),
             "map": str(map_path),
@@ -247,7 +255,7 @@ def evaluate(manifest_path, output_dir, voxel_override=None, tolerance_override=
     grid_regions = {
         str(name): configured_regions[str(name)]
         for name in (evaluation.get("regions") or {})
-        if str(name).startswith("grid_")
+        if re.fullmatch(r"grid_\d+", str(name))
     }
     primary_region = str(evaluation.get("primary_region", "whole_environment"))
     if primary_region not in configured_regions:
@@ -261,6 +269,8 @@ def evaluate(manifest_path, output_dir, voxel_override=None, tolerance_override=
     regions = {}
     region_agents = {}
     primary_plot = None
+    additional_plots = {}
+    additional_regions = evaluation.get("additional_plot_regions", [])
     for name, region_bounds in configured_regions.items():
         print(f"Evaluating region: {name}", flush=True)
         region_gt = set().union(*(
@@ -287,8 +297,8 @@ def evaluate(manifest_path, output_dir, voxel_override=None, tolerance_override=
         swarm, per_agent = evaluate_region(region_gt, filtered_agents, offsets)
         regions[name] = swarm
         region_agents[name] = per_agent
-        if mission is not None and name.startswith("grid_"):
-            grid_id = int(name[5:])
+        if mission is not None and re.fullmatch(r"grid_\d+(?:_second_floor)?", name):
+            grid_id = int(name.split("_")[1])
             for team in mission["teams"]:
                 grid_order = [int(value) for value in team["frontier_grid_order"]]
                 if grid_id not in grid_order:
@@ -304,9 +314,9 @@ def evaluate(manifest_path, output_dir, voxel_override=None, tolerance_override=
                 mission["team_grid_metrics"].setdefault(
                     str(int(team["team_id"])), {}
                 )[name] = team_metrics
-        if name == primary_region:
+        if name == primary_region or name in additional_regions:
             union = set().union(*(agent["occupied"] for agent in filtered_agents))
-            primary_plot = {
+            region_plot = {
                 "ground_truth": region_gt,
                 "matched_ground_truth": matched_source(
                     region_gt, union, offsets
@@ -314,10 +324,19 @@ def evaluate(manifest_path, output_dir, voxel_override=None, tolerance_override=
                 "agent_union": union,
                 "origin": origin,
                 "voxel_size": voxel_size,
-                "bounds_min": primary_min,
-                "bounds_max": primary_max,
-                "grid_regions": grid_regions,
+                "bounds_min": (primary_min if name == primary_region else
+                               np.min([lower for lower, _ in region_bounds], axis=0)),
+                "bounds_max": (primary_max if name == primary_region else
+                               np.max([upper for _, upper in region_bounds], axis=0)),
+                "grid_regions": ({key: configured_regions[key] for key in
+                    (evaluation.get("region_unions") or {}).get(name, [])}
+                    if name in additional_regions else grid_regions),
             }
+
+            if name == primary_region:
+                primary_plot = region_plot
+            else:
+                additional_plots[name] = region_plot
 
     summary = {
         "schema_version": 1,
@@ -345,6 +364,7 @@ def evaluate(manifest_path, output_dir, voxel_override=None, tolerance_override=
         region_agents,
         primary_plot if plots else None,
         interactive_backend=visualise,
+        additional_plot_data=additional_plots if plots else None,
     )
     if visualise:
         print("Interactive 3D viewer opened; close its window to finish.")

@@ -257,6 +257,24 @@ class SnapshotConfiguredRunTests(unittest.TestCase):
         self.assertTrue(manifest["artifact_run"]["maps_copied"])
         self.assertTrue((run_dir / "maps" / "agent003_final.yaml").is_file())
 
+    def test_snapshot_adds_only_selected_second_floor_regions(self):
+        self.config.write_text(CONFIG_SOURCE +
+            "\nFRONTIER_SECOND_FLOOR_DYNAMIC_GRIDS = [20, 21]\n"
+            "FRONTIER_FIRST_FLOOR_VOLUME_Z_RANGE_M = (1, 3)\n"
+            "FRONTIER_SECOND_FLOOR_VOLUME_Z_RANGE_M = (5, 6)\n")
+        self._map(3)
+        run_dir = snapshot(self.artifact_run, self.output_root, self.ground_truth,
+                           self.config, agent_ids=[3])
+        manifest = yaml.safe_load((run_dir / 'manifest.yaml').read_text())
+        evaluation = manifest['evaluation']
+        self.assertEqual(evaluation['additional_plot_regions'], ['second_floor_grid_footprint'])
+        self.assertEqual(evaluation['region_unions']['second_floor_grid_footprint'],
+                         ['grid_20_second_floor'])
+        self.assertEqual(evaluation['regions']['grid_20_second_floor']['min'][2], 3)
+        self.assertEqual(evaluation['regions']['grid_20_second_floor']['max'][2], 6)
+        self.assertNotIn('grid_21_second_floor', evaluation['regions'])
+        self.assertEqual(evaluation['bounds']['max'][2], 6)
+
     def test_npz_snapshot_reads_header_and_preserves_extension(self):
         self.config.write_text(CONFIG_SOURCE.replace('_map.yaml', '_map.npz'))
         path = self.artifact_run / 'agent003_map.npz'

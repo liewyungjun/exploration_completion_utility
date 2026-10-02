@@ -210,7 +210,7 @@ def _plot_grid_regions(axis, grid_regions):
     for name in sorted(grid_regions, key=str):
         label = str(name)
         if label.startswith("grid_"):
-            label = f"Grid {label[5:]}"
+            label = f"Grid {label[5:].removesuffix('_second_floor')}"
         for lower, upper in grid_regions[name]:
             lower = np.asarray(lower, dtype=np.float64)
             upper = np.asarray(upper, dtype=np.float64)
@@ -254,7 +254,8 @@ def _pyplot(interactive):
 
 
 def write_reports(
-    output_dir, summary, region_agents, plot_data=None, interactive_backend=False
+    output_dir, summary, region_agents, plot_data=None, interactive_backend=False,
+    additional_plot_data=None
 ):
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -294,6 +295,22 @@ def write_reports(
         f"| Improvement over best agent | {_percentage_points(primary['improvement_over_best_agent'])} |",
         f"| 🟠 Classification conflicts | {primary['classification_conflicts']:,} |",
     ]
+    second_floor = summary.get("regions", {}).get("second_floor_grid_footprint")
+    if second_floor is not None:
+        floor = (summary.get("mission") or {}).get("second_floor") or {}
+        lines.extend(["", "## Second-floor coverage", "",
+            f"Coverage height: `{floor.get('coverage_z_bounds_m', 'see manifest')}` m; "
+            f"configured frontier volume: `{floor.get('frontier_volume_z_bounds_m', 'see manifest')}` m.", "",
+            "Coverage includes only the grids configured for second-floor search. "
+            "Coverage metrics are independent of route/grid completion outcomes.", "",
+            "| Region | Reference voxels | Recall | Precision | F1 |",
+            "|---|---:|---:|---:|---:|"])
+        for name, metrics in summary["regions"].items():
+            if name == "second_floor_grid_footprint" or name.endswith("_second_floor") or name.endswith("_second_floor_grid_footprint"):
+                lines.append(f"| {name} | {metrics['ground_truth_voxels']:,} | "
+                    f"{_recall_text(metrics['recall'])} | {_percent(metrics['precision'])} | "
+                    f"{_percent(metrics['f1'])} |")
+        lines.extend(["", "![Second-floor coverage](plots/coverage_second_floor_top_down.png)", ""])
     lines.extend(_mission_report_lines(summary, region_agents))
     lines.extend([
         "", "## Reproducibility", "",
@@ -304,7 +321,10 @@ def write_reports(
     ])
     (output / "coverage_summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
+    plots_to_write = dict(additional_plot_data or {})
     if plot_data is not None:
+        plots_to_write["primary"] = plot_data
+    for region_name, plot_data in plots_to_write.items():
         plt = _pyplot(interactive_backend)
         gt = plot_data["ground_truth"]
         matched = plot_data["matched_ground_truth"]
@@ -320,7 +340,8 @@ def write_reports(
         plots.mkdir(exist_ok=True)
         figure, axis = plt.subplots(figsize=(10, 8))
         axis.scatter(
-            points[:, 0], points[:, 1], c=colours, s=1, linewidths=0, zorder=1
+            points[:, 0], points[:, 1], c=colours,
+            s=4 if region_name != "primary" else 1, linewidths=0, zorder=1
         )
         _plot_grid_regions(axis, plot_data.get("grid_regions", {}))
         bounds_min = np.asarray(plot_data["bounds_min"], dtype=np.float64)
@@ -328,13 +349,16 @@ def write_reports(
         axis.set_xlim(bounds_min[0], bounds_max[0])
         axis.set_ylim(bounds_min[1], bounds_max[1])
         axis.set_aspect("equal")
+        height = f"z = {bounds_min[2]:g}–{bounds_max[2]:g} m"
         axis.set_title(
-            "GT reference voxels: matched (green), missed (red); grid IDs shown"
+            ("Second-floor coverage — " + height + "\n" if region_name != "primary" else "")
+            + "GT reference voxels: matched (green), missed (red); grid IDs shown"
         )
         axis.set_xlabel("map x (m)")
         axis.set_ylabel("map y (m)")
         figure.tight_layout()
-        figure.savefig(plots / "coverage_top_down.png", dpi=180)
+        filename = "coverage_top_down.png" if region_name == "primary" else "coverage_second_floor_top_down.png"
+        figure.savefig(plots / filename, dpi=240 if region_name != "primary" else 180)
         plt.close(figure)
 
 

@@ -28,6 +28,17 @@
 
   --no-vis only disables the blocking interactive viewer. The top-down PNG is still generated.
 
+When the frozen mission config requests `FRONTIER_SECOND_FLOOR_DYNAMIC_GRIDS`,
+the snapshot also evaluates the selected second-floor grids and writes
+`results/plots/coverage_second_floor_top_down.png`. Second-floor recall,
+precision, F1, and per-agent metrics appear in the normal JSON, CSV, and
+Markdown reports. Its coverage height spans the first-floor volume's upper
+boundary to the second-floor volume's upper boundary (currently 3–6 m),
+including floor structure below the 5–6 m frontier search volume. The original
+primary coverage region remains unchanged. Only grids on the selected teams'
+routes are included; grid completion status does not imply floor coverage.
+
+
   To use the interactive 3D viewer afterward:
 
   python3 src/exploration_completion_utility/src/evaluate_coverage.py \
